@@ -581,7 +581,9 @@ pub fn draw_group_chrome(
     t: &Tokens,
     reg: &mut crate::automation::Registry,
 ) -> Vec<DockAction> {
-    draw_group_chrome_details(ui, g, focused, seqs, t, reg).actions
+    let chrome = draw_group_chrome_details(ui, g, seqs, t, reg);
+    paint_group_focus(ui, g, focused, t);
+    chrome.actions
 }
 
 #[derive(Default)]
@@ -590,14 +592,7 @@ pub struct Chrome {
     pub tabs: Vec<(PanelKind, Rect)>,
 }
 
-pub fn draw_group_chrome_details(
-    ui: &mut egui::Ui,
-    g: &Group,
-    focused: PanelKind,
-    seqs: &SeqTabs,
-    t: &Tokens,
-    reg: &mut crate::automation::Registry,
-) -> Chrome {
+pub fn draw_group_chrome_details(ui: &mut egui::Ui, g: &Group, seqs: &SeqTabs, t: &Tokens, reg: &mut crate::automation::Registry) -> Chrome {
     let mut actions = Vec::new();
     let mut tab_rects: Vec<(PanelKind, Rect)> = Vec::new();
     let painter = ui.painter().clone();
@@ -738,6 +733,19 @@ pub fn draw_group_chrome_details(
                 if resp.dragged() {
                     dragged = Some(id);
                 }
+                // Escape puts a dragged tab back where it was (egui ends the drag on Escape, #580)
+                let home = egui::Id::new(("tab-seq-home", id));
+                if resp.drag_started()
+                    && let Some(at) = seqs.open.iter().position(|(s, _)| *s == id)
+                {
+                    ui.data_mut(|d| d.insert_temp(home, at));
+                }
+                if resp.drag_stopped()
+                    && let Some(at) = ui.data_mut(|d| d.remove_temp::<usize>(home))
+                    && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    actions.push(DockAction::MoveSequence(id, at));
+                }
             }
             if let Some(id) = tab.seq {
                 reg.add_response(&format!("timeline.tab.{id}"), &resp, &tab.title);
@@ -852,18 +860,27 @@ pub fn draw_group_chrome_details(
             ui.ctx().data_mut(|d| d.remove::<bool>(list_id));
         }
     }
-    // focus outline
-    if active_panel == Some(focused) {
-        painter.rect_stroke(g.rect, 0.0, Stroke::new(1.0, t.focus), StrokeKind::Inside);
-    }
-    // clicking anywhere in the panel focuses it
+    // Activating presses focus their tab immediately, rather than the group's old active panel.
+    // Otherwise entering an inspector can briefly reactivate a stale Project/Timeline selection.
+    // Middle-click closes a tab, so it keeps the active panel as the focus target.
     if let Some(p) = active_panel
         && ui.rect_contains_pointer(g.rect)
         && ui.input(|i| i.pointer.any_pressed())
     {
-        actions.push(DockAction::Focus(p));
+        let panel = ui
+            .input(|i| i.pointer.interact_pos().filter(|_| i.pointer.primary_pressed() || i.pointer.secondary_pressed()))
+            .and_then(|pos| tab_rects.iter().find(|(_, rect)| rect.contains(pos)).map(|(panel, _)| *panel))
+            .unwrap_or(p);
+        actions.push(DockAction::Focus(panel));
     }
     Chrome { actions, tabs: tab_rects }
+}
+
+/// Paint once after the group's contents so child backgrounds cannot hide its focus (#1075).
+pub(crate) fn paint_group_focus(ui: &egui::Ui, group: &Group, focused: PanelKind, tokens: &Tokens) {
+    if group.panels.get(group.active).copied() == Some(focused) {
+        ui.painter().rect_stroke(group.rect, 0.0, Stroke::new(1.0, tokens.focus), StrokeKind::Inside);
+    }
 }
 
 fn paint_widget_focus(painter: &egui::Painter, response: &egui::Response, tokens: &Tokens) {
