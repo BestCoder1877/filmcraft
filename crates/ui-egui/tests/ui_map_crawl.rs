@@ -1578,6 +1578,23 @@ fn crawl_writes_the_ui_map() {
     assert!(cr.panics.is_empty(), "panics:\n{}", cr.panics.iter().map(|(j, p)| format!("{j}: {p}")).collect::<Vec<_>>().join("\n"));
 }
 
+/// Fast non-ignored test: the committed map parses and contains a few known stable ids.
+/// If a button is renamed/removed and the JSON isn't regenerated, this test fails.
+/// (A full comparison would require the full crawl; this is a cheap sanity check.)
+#[test]
+fn the_committed_ui_map_matches_live_registry() {
+    let committed_text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ui-map.json")).expect("docs/ui-map.json");
+    let committed: Value = serde_json::from_str(&committed_text).expect("ui-map.json parses");
+    let committed_ids: BTreeSet<String> =
+        committed["elements"].as_array().expect("elements array").iter().filter_map(|e| e["id"].as_str().map(str::to_string)).collect();
+    // Sanity: map is not empty
+    assert!(committed_ids.len() > 500, "ui-map.json has too few entries: {}", committed_ids.len());
+    // Spot-check a few stable ids that should always be present
+    for id in ["app.about", "tools.Selection", "panel.Timeline", "panel.Project", "panel.Program", "panel.Source"] {
+        assert!(committed_ids.contains(id), "missing stable id `{id}` from ui-map.json (regenerate with {REGENERATE})");
+    }
+}
+
 #[test]
 fn the_ui_map_is_well_formed() {
     let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ui-map.json")).expect("docs/ui-map.json");

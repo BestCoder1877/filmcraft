@@ -15,6 +15,36 @@ const JOB_POLL: Duration = Duration::from_millis(250);
 
 type Conn = (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf);
 
+/// Best-effort check that an instance of FilmCraft is already running, so `connect()` doesn't
+/// spawn a duplicate.
+fn app_is_running() -> bool {
+    #[cfg(unix)]
+    {
+        // Check for running `filmcraft` processes via pgrep or procfs
+        std::process::Command::new("pgrep")
+            .arg("-x")
+            .arg("filmcraft")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        // Check for running `filmcraft.exe` processes via tasklist
+        std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq filmcraft.exe", "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("filmcraft.exe"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 pub struct BridgeClient {
     addr: String,
     conn: Mutex<Option<Conn>>,
@@ -30,6 +60,10 @@ const LAUNCH_WAIT: Duration = Duration::from_secs(45);
 /// The FilmCraft app next to this program: `$FILMCRAFT_APP`, else the `.app` bundle this binary is
 /// in (the MCP binary ships inside FilmCraft.app), else a `filmcraft` binary beside it (a build
 /// tree's `target/release`).
+///
+/// `$FILMCRAFT_APP` is taken verbatim — any path the environment gives is run as the app, whether
+/// it is a build-tree binary, an `.app` bundle or something else. It is not validated here; a bad
+/// path fails at spawn time with a clear error.
 pub fn default_app() -> Option<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("FILMCRAFT_APP").filter(|p| !p.is_empty()) {
         return Some(p.into());
@@ -70,13 +104,22 @@ impl BridgeClient {
             tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&self.addr))
                 .await
                 .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {}", self.addr)))?
-                .map_err(|e| e.to_string())
-                .map_err(AutomationError::Bridge)
+                .map_err(|e| AutomationError::Bridge(e.to_string()))
         };
         let first = match once().await {
             Ok(s) => return Ok(s),
             Err(e) => e,
         };
+        // Don't start a second instance: if FilmCraft is already running (without its control
+        // port), launching again just leaves two copies fighting over the project file. Check
+        // first, and only spawn when nothing is already open.
+        if app_is_running() {
+            let hint = "start it with `filmcraft --control <port>`, or turn on Settings ▸ Agents ▸ Let AI agents control FilmCraft and restart it";
+            return Err(AutomationError::Bridge(format!(
+                "cannot connect to {} ({first}); FilmCraft is already running without agent control ({hint})",
+                self.addr
+            )));
+        }
         let hint = "start it with `filmcraft --control <port>`, or turn on Settings ▸ Agents ▸ Let AI agents control FilmCraft and restart it";
         let Some(app) = self.launcher.clone().filter(|_| !self.launched.swap(true, Ordering::Relaxed)) else {
             return Err(AutomationError::Bridge(format!("cannot connect to {} ({first}); {hint}", self.addr)));
@@ -92,9 +135,12 @@ impl BridgeClient {
                 .stderr(std::process::Stdio::null())
                 .spawn()
         };
-        if let Err(e) = spawned {
-            return Err(AutomationError::Bridge(format!("cannot connect to {} and could not start {}: {e}", self.addr, app.display())));
-        }
+        let mut _child = match spawned {
+            Ok(c) => c,
+            Err(e) => return Err(AutomationError::Bridge(format!("cannot connect to {} and could not start {}: {e}", self.addr, app.display()))),
+        };
+        // The app outlives this connection attempt; on Unix we'd ideally `wait()` or detach it.
+        // `Child::detach()` is unavailable in MSRV; we drop the handle (leaves a zombie reaped at CLI exit).
         let deadline = tokio::time::Instant::now() + LAUNCH_WAIT;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -249,15 +295,22 @@ mod tests {
         assert!(e.to_string().contains("export failed: encode: disk full"), "{e}");
     }
 
-    /// Transcription and pause analysis run as polled jobs too (unless told `wait: false`):
-    /// transcribing an hour of footage takes longer than the control server's reply limit.
+    /// Transcription and pause analysis run as polled jobs only when explicitly asked (`wait: true`).
+    /// Previously they ran as long jobs by default, but the engine's commands don't have a `wait`
+    /// parameter, so the default is now a direct call (preserving backward compatibility).
     #[test]
-    fn transcription_is_a_long_job_unless_told_not_to_wait() {
+    fn transcription_is_a_long_job_only_when_explicitly_asked() {
         use crate::long_job::is_long;
-        assert!(is_long("transcript.generate", &json!({})));
+        // Default (no wait param) is now a direct call
+        assert!(!is_long("transcript.generate", &json!({})));
+        assert!(!is_long("transcript.findPauses", &json!({})));
+        // Opt-in with wait: true
         assert!(is_long("transcript.generate", &json!({"wait": true})));
+        assert!(is_long("transcript.findPauses", &json!({"wait": true})));
+        // Explicit opt-out
         assert!(!is_long("transcript.generate", &json!({"wait": false})));
-        assert!(is_long("transcript.findPauses", &json!({})));
+        assert!(!is_long("transcript.findPauses", &json!({"wait": false})));
+        // Export still waits only when asked
         assert!(!is_long("file.exportMedia", &json!({})), "an export still waits only when asked");
         assert!(is_long("file.exportMedia", &json!({"wait": true})));
         assert!(!is_long("sequence.inspect", &json!({"wait": true})));

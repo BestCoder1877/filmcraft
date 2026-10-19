@@ -1690,10 +1690,12 @@ impl FilmcraftApp {
         }
         // the Timeline has had its chance to place a file drop this frame; anything left stays a bin import
         self.pending_timeline_drop = None;
+        self.auto.mark_dialogs();
         panels::dialogs::show(self, &ctx);
         if !self.ui.show_status_bar {
             // no bar to draw the job in, but a finished preview render still plays
             self.watch_jobs(ui.ctx());
+            self.auto.end_frame();
             return;
         }
         // Status / hint bar
@@ -1716,6 +1718,7 @@ impl FilmcraftApp {
             self.ui.status.clear();
         }
         self.job_status(ui, sb, &t);
+        self.auto.end_frame();
     }
 
     /// The running job (export / render previews), if any; plays the rendered range when a preview

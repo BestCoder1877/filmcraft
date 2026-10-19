@@ -89,8 +89,11 @@ fn a_modal_dialog_turns_clicks_and_keys_behind_it_into_errors() {
     assert!(e.contains("a dialog is open") && e.contains("settings.ok"), "and says how to answer it: {e}");
     assert_ne!(format!("{:?}", d.harness.state().ui.tool), "Razor");
 
-    // a shortcut doesn't edit the timeline behind the dialog either
-    d.ok("ui.key", json!({"key": "Delete"}));
+    // a shortcut doesn't edit the timeline behind the dialog either - it errors
+    let v = d.call("ui.key", json!({"key": "Delete"}));
+    assert_eq!(v["ok"], json!(false), "a key behind the dialog fails: {v}");
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("a dialog is open"), "and says how to answer it: {e}");
     d.frames(3);
     assert_eq!(d.clips(), before, "Delete reached the timeline behind the Settings dialog");
 

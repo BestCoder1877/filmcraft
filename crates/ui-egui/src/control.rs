@@ -320,6 +320,33 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                 Err(e) if e.starts_with(RETRY) => return Outcome::Retry(e.trim_start_matches(RETRY).to_string()),
                 Err(e) => return err(e),
             };
+            if req.method == "ui.click" {
+                // Refuse clicks behind a modal or floating dialog window. A click named after one
+                // of the dialog's own elements still lands (it is in the dialog, not behind it).
+                let dialog_elements = app.auto.dialog_elements();
+                if !dialog_elements.is_empty() {
+                    let target_id = p.get("id").and_then(Value::as_str);
+                    let in_dialog = target_id.is_some_and(|id| app.auto.in_dialog(id));
+                    if !in_dialog {
+                        let ids = dialog_elements.iter().map(|e| format!("`{}`", e.id)).collect::<Vec<_>>().join(", ");
+                        // A modal dialog (Settings, Recovery) blocks everything behind it.
+                        if ctx.memory(|m| m.top_modal_layer()).is_some() {
+                            return err(format!("a dialog is open: click one of {ids} first"));
+                        }
+                        // A floating dialog window (Add Tracks, Audio Gain, etc.) blocks only its
+                        // visual area. Approximate that area by the bounding box of all dialog
+                        // elements; if the click position falls in that box, it's under the dialog.
+                        let min_x = dialog_elements.iter().map(|e| e.rect[0]).fold(f32::INFINITY, f32::min);
+                        let min_y = dialog_elements.iter().map(|e| e.rect[1]).fold(f32::INFINITY, f32::min);
+                        let max_x = dialog_elements.iter().map(|e| e.rect[0] + e.rect[2]).fold(f32::NEG_INFINITY, f32::max);
+                        let max_y = dialog_elements.iter().map(|e| e.rect[1] + e.rect[3]).fold(f32::NEG_INFINITY, f32::max);
+                        let dialog_bounds = egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
+                        if dialog_bounds.contains(pos) {
+                            return err(format!("target covered by a dialog window: click one of {ids} first"));
+                        }
+                    }
+                }
+            }
             let m = modifiers(p);
             app.synthetic.push(egui::Event::ModifiersChanged(m));
             app.synthetic.push(egui::Event::PointerMoved(pos));
@@ -385,6 +412,11 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
         "ui.key" => {
             let Some(name) = s("key") else { return err("missing `key`") };
             let Some((m, key)) = crate::menus::parse_shortcut(name) else { return err(format!("unknown key `{name}`")) };
+            // A modal dialog eats shortcuts aimed behind it (e.g. Delete while Settings is up).
+            if !app.auto.dialog_elements().is_empty() {
+                let ids = app.auto.dialog_elements().iter().map(|e| format!("`{}`", e.id)).collect::<Vec<_>>().join(", ");
+                return err(format!("a dialog is open: press one of {ids} first"));
+            }
             let m = as_pressed(m | modifiers(p));
             app.synthetic.push(egui::Event::ModifiersChanged(m));
             app.synthetic.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: m });
@@ -513,6 +545,13 @@ pub fn inspect(app: &FilmcraftApp, ctx: &egui::Context) -> Value {
         "selection": app.session.state.selection.iter().map(|c| c.0).collect::<Vec<_>>(),
         "elements": app.auto.previous.len(),
         "dialog": app.dialog.map(|d| format!("{d:?}")),
+        "modal": match ctx.memory(|m| m.top_modal_layer()).and_then(|l| ctx.memory(|m| m.area_rect(l.id))) {
+            Some(r) => json!({
+                "rect": [r.min.x, r.min.y, r.width(), r.height()],
+                "elements": app.auto.dialog_elements().iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect::<Vec<_>>(),
+            }),
+            None => Value::Null,
+        },
     })
 }
 

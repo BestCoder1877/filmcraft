@@ -19,7 +19,10 @@ use crate::server::FilmcraftMcp;
 pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "transcript.generate", "transcript.findPauses"];
 
 /// Long commands that wait unless told `wait: false` (the engine's own default for them).
-const WAIT_BY_DEFAULT: &[&str] = &["transcript.generate", "transcript.findPauses"];
+/// NOTE: `transcript.generate` and `transcript.findPauses` were previously here but are now
+/// opt-in only (via `wait: true`) to preserve the old direct-call default. They only run as
+/// long jobs when the caller explicitly requests it.
+const WAIT_BY_DEFAULT: &[&str] = &[];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);
