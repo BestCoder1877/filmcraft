@@ -242,8 +242,13 @@ fn start(s: &mut Session, p: &Value, work: Vec<Work>, skipped: Vec<u64>, rec: Re
     if s.transcribe_jobs.iter().any(|j| s.jobs.iter().any(|x| x.id == j.job && !x.progress.finished.load(Ordering::Relaxed))) {
         return Err(EngineError::Other("a transcription is already running (cancel it first)".into()));
     }
-    let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
+    let id = s.next_job_id();
     let n = work.len();
+    // DECISION POINT (not yet made): these job labels and the status strings below ("Downloading …",
+    // "Stopped: nothing was changed", "Found the pauses in … clip(s)", "Transcribed … words in …
+    // clip(s)") are English and reach the Progress panel untranslated. Translating them is a
+    // maintainer judgment call (i18n scope, which strings are user-facing, whether the engine
+    // should own locale lookup) — left as-is for now.
     let label = if voice_only {
         format!("Find pauses ({n} clip{})", if n == 1 { "" } else { "s" })
     } else {
@@ -351,7 +356,16 @@ fn start(s: &mut Session, p: &Value, work: Vec<Work>, skipped: Vec<u64>, rec: Re
             None => format!("Transcribed {words} words in {} clip(s) ({secs:.1}s)", done.len()),
         });
         let r = match err {
-            Some(e) => Err(e),
+            // "stopped" (cancel): all-or-nothing — drop `done` so nothing is applied.
+            Some(e) if e == "stopped" => Err(e),
+            // A clip failed after some succeeded: keep the transcripts already produced
+            // (`poll` applies them) and report the failing clip's name (the status line
+            // above already says so). A download/load error before the loop leaves `done`
+            // empty, which is the same as applying nothing.
+            Some(e) => {
+                *lock(&out) = Some(done);
+                Err(e)
+            }
             None => {
                 *lock(&out) = Some(done);
                 Ok(filmcraft_export::Report { path: String::new(), frames: words as u64, seconds: secs, bytes: 0, render_fps: 0.0, extra_files: Vec::new() })
@@ -940,7 +954,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "transcript.generate",
             "Transcribe…",
             &["Sequence", "Transcript"],
-            r#"{"items":[id]?,"model":"whisper-large-v3-turbo"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?,"download":bool?,"wait":bool?}"#,
+            r#"{"items":[id]?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?,"download":bool?,"wait":bool?}"#,
             can_transcribe,
             generate,
             true,
